@@ -73,13 +73,6 @@ question ──► vessel profile (structured output; schema generated from the 
 
 Restarted ingestions resume from checkpoints of the vision transcriptions and extracted facts.
 
-### Is RAPTOR the right fit?
-
-Partly, and that shaped the design. Tariff questions are computations, not summaries. A RAPTOR-style digest is good
-for *finding* the clauses that matter, but a figure that has been summarised twice shouldn't be trusted for
-arithmetic. So the hierarchy follows the document's own numbering instead of embedding clusters, digests are used
-for navigation only, and every number comes from verbatim clause text through a compiled rule.
-
 ### The rule language
 
 Most charges are "rate × units, picked by port, size band or item, adjusted by a few conditions". A `ChargeRule`
@@ -235,16 +228,3 @@ backend/portdues
 backend/scripts/golden   dataset builder and the labelling reference
 frontend/src             React app (documents, chat, experiments)
 ```
-
-## Limitations and next steps
-
-- A small model's compile still varies from run to run; the guards above bring it to the Sol rulebook's results
-  on this tariff, but a human review of the rulebook (approve or edit a rule in the rulebook view) is the natural
-  next feature before relying on it for invoices.
-- The core vocabulary (GT, LOA, stay, services, common flags) is generic shipping terminology; a tariff that
-  hinges on something exotic gets rule-declared variables, which the profile extractor must then fill from the
-  question.
-- Questions about situational services that are not compiled (dry-docking, fire services, equipment hire) are
-  answered as "not priced" rather than researched.
-- Multi-document ports (a tariff plus a notice amending it) would need rule precedence by effective date.
-- VAT is reported, not added, matching how the reference values are stated.
