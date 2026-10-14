@@ -82,7 +82,11 @@ export interface ChargeRule {
   description: string;
   applies_when: Condition[];
   constants: NamedValue[];
-  tables: { name: string; description: string; bands: { lower: number; upper: number | null; values: NamedValue[] }[] }[];
+  tables: {
+    name: string;
+    description: string;
+    bands: { key?: string | null; lower: number | null; upper: number | null; values: NamedValue[] }[];
+  }[];
   variants: { label: string; when: Condition[]; formula: string }[];
   minimum: number | null;
   maximum: number | null;

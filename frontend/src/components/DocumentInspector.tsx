@@ -231,16 +231,29 @@ function RuleDetail({ rule, docId }: { rule: ChargeRule; docId: string }) {
       )}
       {rule.tables.map((t) => {
         const cols = Array.from(new Set(t.bands.flatMap((b) => b.values.map((v) => v.name))));
+        // keyed tables (e.g. commodities) have a row name instead of a numeric range
+        const keyed = t.bands.some((b) => b.key);
         return (
           <div key={t.name}>
             <div className="small" style={{ marginBottom: 4 }}><b className="mono">{t.name}</b> <span className="muted">{t.description}</span></div>
             <table className="table">
-              <thead><tr><th>From</th><th>To</th>{cols.map((c) => <th key={c} className="r">{c}</th>)}</tr></thead>
+              <thead>
+                <tr>
+                  {keyed ? <th>Item</th> : <><th>From</th><th>To</th></>}
+                  {cols.map((c) => <th key={c} className="r">{c}</th>)}
+                </tr>
+              </thead>
               <tbody>
                 {t.bands.map((b, i) => (
                   <tr key={i}>
-                    <td className="num">{b.lower.toLocaleString()}</td>
-                    <td className="num">{b.upper === null ? "∞" : b.upper.toLocaleString()}</td>
+                    {keyed ? (
+                      <td>{b.key ?? "—"}</td>
+                    ) : (
+                      <>
+                        <td className="num">{b.lower === null ? "—" : b.lower.toLocaleString()}</td>
+                        <td className="num">{b.upper === null ? "∞" : b.upper.toLocaleString()}</td>
+                      </>
+                    )}
                     {cols.map((c) => <td key={c} className="r num">{money(b.values.find((v) => v.name === c)?.value)}</td>)}
                   </tr>
                 ))}
