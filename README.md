@@ -17,8 +17,8 @@ that port's rulebook.
 | **Reference vessel** (SUDESTADA, Durban) | 4 of 6 charges exact to the cent, 2 within 0.09%; [the gap is in the brief's inputs](#the-reference-values) |
 | **Golden set** (30 questions, easy/medium/hard) | all 30 calls priced correctly by the compiled rules |
 | **Model** | everything on `gpt-6-luna`, the lowest-cost model available; each role's model is configurable |
-| **Cost** | ~$0.06 to read a 54-page tariff, ~$0.56 to compile its rules (once), **~$0.001 per question** |
-| **Latency** | ~7 s per answer, streamed token by token |
+| **Cost** | ≈$0.06 to read a 54-page tariff, ≈$0.56 to compile its rules (once), **≈$0.001 per question** |
+| **Latency** | ≈7 s per answer, streamed token by token |
 | **Stack** | LangChain + LangGraph, FastAPI (SSE), PostgreSQL, Qdrant, React, self-hosted Langfuse, Docker Compose |
 
 ## How it works
@@ -209,8 +209,8 @@ the tariff (`scripts/golden/za_reference.py`) that the application never imports
 | | Checks | Cost |
 |---|---|---|
 | `portdues check-rules <doc>` | compiled rules on the golden calls | free, deterministic |
-| `portdues compare-rules <doc> other.json` | two rulebooks over ~300 calls, every difference listed | free |
-| Experiments page / `portdues eval` | full pipeline, scored by numeric ±1%, an LLM judge and [Laya](https://huggingface.co/convaiinnovations/laya) | ~$0.03 for 30 questions |
+| `portdues compare-rules <doc> other.json` | two rulebooks over ≈300 calls, every difference listed | free |
+| Experiments page / `portdues eval` | full pipeline, scored by numeric ±1%, an LLM judge and [Laya](https://huggingface.co/convaiinnovations/laya) | ≈$0.03 for 30 questions |
 
 Laya, an open-source System-1 decision model (ModernBERT, calibrated probabilities), scores coverage and
 presentation with typed yes/no checks. Numeric correctness is scored deterministically and by the judge. Runs
@@ -236,7 +236,7 @@ dollars, shown in the UI and in Langfuse:
 | Vision (29 pages) | 75k | 16k | $0.016 |
 | Facts + digests (82 clauses) | 100k | 67k | $0.044 |
 | Rule compilation (18 rules, verified) | 3.5M (85% cached) | 413k | $0.56 |
-| One answer | ~5–9k | ~0.5k | ~$0.001 |
+| One answer | ≈5–9k | ≈0.5k | ≈$0.001 |
 
 <details>
 <summary>More screenshots: documents and a follow-up question</summary>
