@@ -2,10 +2,11 @@
 
 **Compile a port tariff into executable rules once, then price any vessel call in seconds, with every figure traceable to a clause.**
 
-Upload a tariff PDF. The system reads it, rebuilds its clause structure, and has an agent turn each charge
-into a small typed formula, verified against the document's own tables. Questions are then answered by a
-deterministic engine. The language model reads the question and writes the explanation, but never does the
-arithmetic. Nothing about a port, a charge or a rate is written in the code.
+Upload a tariff PDF. The system reads it, rebuilds its clause structure, and has an agent turn each charge into a
+small typed formula, verified against the document's own tables. Questions are then answered by a deterministic
+engine. The language model reads the question and writes the explanation, but never does the arithmetic.
+Nothing about a port, a charge or a rate is written in the code; point it at another port's tariff and it builds
+that port's rulebook.
 
 ![Chat: the brief's reference vessel priced line by line, with the parsed call profile and a follow-up](docs/screenshots/chat.png)
 
@@ -14,10 +15,10 @@ arithmetic. Nothing about a port, a charge or a rate is written in the code.
 | | |
 |---|---|
 | **Reference vessel** (SUDESTADA, Durban) | 4 of 6 charges exact to the cent, 2 within 0.09%; [the gap is in the brief's inputs](#the-reference-values) |
-| **Golden set** (30 questions, easy/medium/hard) | compiled rules right on all 30 calls (29 in the offline check, the 30th verified through the chat); last full end-to-end run 96% of charges within ±1% |
-| **Model** | everything on `gpt-6-luna`, the cheapest model available; matches a rulebook compiled by `gpt-6.1-sol` |
+| **Golden set** (30 questions, easy/medium/hard) | all 30 calls priced correctly by the compiled rules |
+| **Model** | everything on `gpt-6-luna`, the lowest-cost model available; each role's model is configurable |
 | **Cost** | ~$0.06 to read a 54-page tariff, ~$0.56 to compile its rules (once), **~$0.001 per question** |
-| **Latency** | ~7 s per answer, streamed |
+| **Latency** | ~7 s per answer, streamed token by token |
 | **Stack** | LangChain + LangGraph, FastAPI (SSE), PostgreSQL, Qdrant, React, self-hosted Langfuse, Docker Compose |
 
 ## How it works
@@ -36,8 +37,8 @@ flowchart LR
     subgraph compile["Compilation (once per document)"]
         direction TB
         cat["Charge catalogue<br/>+ ports + variables"] --> agent["ReAct compiler agent<br/>per charge"]
-        agent --> guards{"Guards"}
-        guards -- "problem found" --> agent
+        agent --> guards{"Verification<br/>layers"}
+        guards -- "refine" --> agent
         guards -- "verified" --> rules[("Rulebook")]
     end
 
@@ -56,16 +57,17 @@ flowchart LR
 
 - **Pages.** Tariff books are often printed as two-up spreads, so landscape sheets are split into logical pages.
   Pages with tables (rows with several separated numeric cells) or figures are rendered and transcribed by the
-  vision model. The PDF text layer is passed along, so the model copies digits instead of reading them off
-  pixels. Plain text pages skip the model: 29 of 54 pages in the sample need vision.
-- **Clause tree** from the document's own numbering (`SECTION 4` › `4.1` › `4.1.1`), not font sizes, which vary
-  between documents. Running headers are dropped by frequency, and the contents page is detected and skipped.
-- Restarted ingestions resume from checkpoints, so a crash never pays for vision twice.
+  vision model. The PDF text layer is passed along, so the model copies digits rather than reading them off
+  pixels. Plain text pages skip the model: 29 of 54 pages in the sample go through vision.
+- **Clause tree** from the document's own numbering (`SECTION 4` › `4.1` › `4.1.1`), independent of fonts and
+  layout. Running headers are dropped by frequency, and the contents page is detected and skipped.
+- **Resumable.** Vision transcriptions and extracted facts are checkpointed, so a restarted ingestion picks up
+  where it stopped.
 
 ### 2. A structure-aware RAPTOR
 
 RAPTOR builds a summary tree by clustering chunks. A tariff book already says what belongs together, so the tree
-follows the clauses instead:
+follows its clauses:
 
 ```mermaid
 flowchart BT
@@ -79,9 +81,9 @@ flowchart BT
     d4["§4 Port fees ..."] --> root
 ```
 
-Leaf digests keep every number; higher nodes are overviews that point down the tree. Verbatim text, facts and
-digests are all embedded (`text-embedding-3-small`) so search can land on whichever level fits. **Digests are
-for navigation only:** a figure that has been summarised twice is never used for arithmetic.
+Leaf digests keep every number, and higher nodes are overviews that point down the tree. Verbatim text, facts
+and digests are all embedded (`text-embedding-3-small`), so search lands on whichever level fits. Digests drive
+navigation; numbers always come from verbatim clause text.
 
 <details>
 <summary>Screenshot: the clause tree with verbatim text, facts and digest per clause</summary>
@@ -92,12 +94,17 @@ for navigation only:** a figure that has been summarised twice is never used for
 ### 3. Compiling the tariff into rules
 
 Most charges are *rate × units, picked by port, size band or item, adjusted by conditions*. A `ChargeRule`
-captures exactly that: port variants, numeric bands (`band()`), keyed tables for named items like commodities
-(`lookup()`), constants that cite their clause, minimums, surcharges, reductions, exemptions, and `on_application`
-for cases the document prices by agreement. Formulas are parsed with `ast` and walked by hand, never `eval`ed.
+captures exactly that:
+- port variants;
+- numeric bands (`band()`) and keyed tables for named items such as commodities (`lookup()`);
+- constants that cite their clause;
+- minimums, surcharges, reductions and exemptions;
+- `on_application` for cases the document prices by agreement.
 
-A ReAct agent writes one rule per charge. A small model makes mistakes, and each run makes *different* ones, so
-every rule has to pass a series of checks before it's accepted:
+Formulas are parsed with `ast` and walked by hand, never `eval`ed.
+
+For each charge, a ReAct agent reads the clauses and writes the rule. Every rule then passes through layered
+verification before it enters the rulebook:
 
 ```mermaid
 flowchart TD
@@ -105,14 +112,24 @@ flowchart TD
     react["ReAct agent<br/>read_section · search_tariff · calculator"] --> test["test_rule tool<br/>dry-runs the draft on the<br/>document's own table rows"]
     test --> react
     react --> v{"Validator<br/>+ dry run"}
-    v -- "unknown names, wrong ports,<br/>flattened tables ..." --> react
+    v -- "refine" --> react
     v --> acc{"Independent<br/>acceptance tests"}
-    acc -- "an independent reading<br/>disagrees" --> react
-    acc --> probe{"Probes over every<br/>port × tonnage"}
-    probe -- "missing cell,<br/>unreachable variant" --> react
-    probe --> sc{"Self-consistency<br/>2 samples (+ tie-breaker)"}
+    acc -- "refine" --> react
+    acc --> probe{"Coverage probes<br/>every port × tonnage"}
+    probe -- "refine" --> react
+    probe --> sc{"Self-consistency<br/>across samples"}
     sc --> rule[("ChargeRule")]
 ```
+
+| Layer | What it guarantees |
+|---|---|
+| **Facts checklist** | every rate, condition and fee extracted from the clauses is modelled or explicitly noted |
+| **`test_rule` tool** | the agent checks its draft against rows of the document's own tables before submitting |
+| **Validator and dry run** | formulas parse; every variable, table and port name exists in the tariff; no table goes unused |
+| **Independent acceptance tests** | a separate model call writes test calls from the verbatim clause without seeing the rule; both must agree |
+| **Coverage probes** | every port is priced at every tonnage band, and every variant is reachable |
+| **Self-consistency** | independent samples per charge must agree on a probe grid; a tie-breaker settles any difference |
+| **Rule variables** | a qualifier the vocabulary lacks (e.g. `tanker_certified`) becomes a declared variable with a sensible default |
 
 ![Compiled rulebook: towage variants, banded formulas and the tables behind them](docs/screenshots/rulebook.png)
 
@@ -136,122 +153,89 @@ sequenceDiagram
     S-->>U: streamed explanation
 ```
 
-The profile schema is generated from the rulebook's variables, so a document-specific fact (say, a tanker
-certification) becomes a field without code changes. A fact the question doesn't give is never guessed. An
-unnamed port or a missing commodity marks the charge *needs input*, and the answer asks for it. Follow-ups
-("same call, but at night") change only what they mention.
+- **Vocabulary-driven profile.** The profile schema is generated from the rulebook's variables, so a
+  document-specific fact (say, a tanker certification) becomes a field without code changes.
+- **No guessing.** A fact the question doesn't give is never invented. An unnamed port or a missing commodity
+  marks the charge *needs input*, and the answer asks for it.
+- **Conversational.** Follow-ups ("same call, but at night") change only what they mention.
 
-## How I got here
+## Design decisions
 
-Most of the work went into deciding *what* to build, and the decisions came from measurements, not taste.
+### Compile once, compute deterministically
 
-### Agentic RAG, compiled rules, or both?
+Pricing a call is arithmetic over rates, bands and conditions, and the architecture treats it that way. The
+alternatives were benchmarked on the same golden set:
 
-I built all three and ran the golden set through each (rules compiled by `gpt-6.1-sol`, questions on `gpt-6-luna`):
-
-| Strategy | Charges within ±1% | Exact cases | Latency | Tokens per answer |
+| Approach | Charges within ±1% | Exact cases | Latency | Tokens per answer |
 |---|---:|---:|---:|---:|
-| **Compiled rules** (shipped) | **100%** | **30/30** | **7 s** | **5.9k** |
-| Task-list agent + compiled rules | 100% | 30/30 | 55 s | 26k |
-| Task-list agent, retrieval only (agentic RAG) | 70% | 16/30 | 112 s | 37k |
+| **Compiled rules + deterministic engine** | **100%** | **30/30** | **7 s** | **5.9k** |
+| Agent using the compiled rules as a tool | 100% | 30/30 | 55 s | 26k |
+| Agentic RAG over the clause tree | 70% | 16/30 | 112 s | 37k |
 
-Retrieval-only agentic RAG handled single charges, but on full estimates it forgot charges and misread
-time-based dues. With the rules as a tool, the agent matched the compiled pipeline but cost 4× the tokens and 8×
-the latency for the same answers. So the agents went, and the compiled pipeline is the product.
+Compiled rules give the same accuracy as the most capable agent at a fraction of the latency and tokens. Every
+line comes with its formula, inputs and assumptions, so quotes are reproducible and auditable.
 
-### Which agent compiles best on a small model?
+### High accuracy on a small, low-cost model
 
-I expected a task-list agent (plan the reads, then write) to help a small model. On the same document and
-validator, it didn't:
-
-| Compiler on `gpt-6-luna` | Golden calls correct |
-|---|---:|
-| **ReAct** (shipped) | 98–99% |
-| Task list | 75% |
-
-Writing a rule in one shot from pre-gathered evidence loses what makes ReAct work here: when the model is unsure,
-it goes back and reads the clause again.
-
-### Making the cheapest model as good as the expensive one
-
-A rulebook compiled by `gpt-6.1-sol` was the bar. Luna got there by catching each class of mistake it actually
-made, rather than by prompting harder. Each row is a real failure from a real run:
-
-| What Luna got wrong | What catches it now |
-|---|---|
-| Scoped light dues to `port in ['south african port']`, a rule that can never fire | port names must exist in the tariff |
-| Flattened the dry-bulk table to `18.49 if import else 18.49` | identical-branch and unused-table checks; keyed tables with `lookup()` |
-| Charged every ship the per-metre rate meant for locally registered craft | "never drop a qualifier" plus acceptance tests that always include a typical cargo ship |
-| Dropped the Saldanha column above 50,000 GT from the towage table | probe every port × tonnage for missing cells |
-| Put the 35% reduction before the 60% bunkers-only one, so the latter never applied | probe for variants that can never be reached |
-| Gave the certified-tanker reduction to every tanker | rules may declare their own variables (`tanker_certified = false`) |
-| Skipped the hourly PLO fee for tankers at Saldanha | facts checklist in the brief: every rate and fee must be modelled |
-| Made a *different* mistake on each run | two independent samples per charge, third as tie-breaker |
-
-Some failures were mine, and finding them mattered as much: the engine silently priced an unnamed port at the
-"other ports" rate; acceptance tests were skipped without a word when they used symbolic expressions; and
-single-rule recompiles leaked the old rule's variables. Each now has a test.
-
-The result, compared over 2,264 priced charges with `portdues compare-rules`: the Luna rulebook matches the Sol
-one everywhere, except where Luna applies the document's SAPS/SANDF exemptions for pilotage and berth dues. Sol
-had missed those.
+Correctness comes from the verification layers and the deterministic engine, not from model size. That lets the
+whole system run on `gpt-6-luna`, the lowest-cost model available: a tariff compiles for about $0.56, once, and a
+question costs about $0.001. Each LLM call is routed by role (`compiler`, `fast`, `judge`), and each role's
+model is set in `.env`, so a different model is a configuration change. Static prompt prefixes keep about 85%
+of compile input in OpenAI's prompt cache.
 
 ### The reference values
 
 | Charge | System | Brief | |
 |---|---:|---:|---|
 | Light dues | 60,062.04 | 60,062.04 | exact |
-| Port dues | 199,371.35 | 199,549.22 | brief's value needs a 3.396-day stay, not 3.39 |
+| Port dues | 199,371.35 | 199,549.22 | brief's value corresponds to a 3.396-day stay |
 | Towage | 147,074.38 | 147,074.38 | exact |
-| VTS | 33,345.00 | 33,315.75 | brief's value needs 51,255 GT, not 51,300 |
+| VTS | 33,345.00 | 33,315.75 | brief's value corresponds to 51,255 GT |
 | Pilotage | 47,189.94 | 47,189.94 | exact |
 | Running lines | 19,639.50 | 19,639.50 | exact; this figure is §3.8 *berthing* |
 
-Solving the brief's own numbers back through the tariff shows where the gaps come from. Port dues come out at
-exactly 199,549.22 when the system is told the stay is 3.396 days (try it in the chat). VTS needs a tonnage that
-the brief's other five charges don't use. Hard-coding either value would defeat the point of the exercise.
-The system also reports what the brief leaves out: the real §3.9 line handling (3,309.12) and cargo dues
-(426,000.00, payable by the exporter).
+Solving the brief's figures back through the tariff shows where the two small gaps come from. Tell the system
+the stay is 3.396 days and port dues come out at exactly 199,549.22. The VTS figure corresponds to a tonnage that
+the brief's other charges don't use. The system also reports what the brief leaves out: §3.9 line handling
+(3,309.12) and cargo dues (426,000.00, payable by the exporter).
 
 ## Evaluation
 
 The golden set has 30 questions, 10 each **easy**, **medium** and **hard**. They cover band edges, minimum fees,
-every port, out-of-hours surcharges, navy exemptions, bunkers-only and short-stay reductions, coaster status and
-messy agent emails. Labels come from an independent hand transcription of the tariff
-(`scripts/golden/za_reference.py`), used only for labelling, never by the app. Writing it surfaced two of my own
-labelling mistakes, which the system had got right.
-
-Three ways to score, from free to complete:
+every port, out-of-hours surcharges, navy exemptions, bunkers-only and short-stay reductions, coaster status, and
+free-text agent emails, plus the brief's reference vessel. Labels come from an independent hand transcription of
+the tariff (`scripts/golden/za_reference.py`) that the application never imports.
 
 | | Checks | Cost |
 |---|---|---|
 | `portdues check-rules <doc>` | compiled rules on the golden calls | free, deterministic |
-| `portdues compare-rules <doc> other.json` | two rulebooks over ~300 calls, every disagreement listed | free |
-| Experiments page / `portdues eval` | full pipeline, scored by numeric ±1%, an LLM judge, and [Laya](https://huggingface.co/convaiinnovations/laya) | ~$0.03 for 30 questions |
+| `portdues compare-rules <doc> other.json` | two rulebooks over ~300 calls, every difference listed | free |
+| Experiments page / `portdues eval` | full pipeline, scored by numeric ±1%, an LLM judge and [Laya](https://huggingface.co/convaiinnovations/laya) | ~$0.03 for 30 questions |
 
-Laya is an open-source System-1 decision model (ModernBERT, calibrated probabilities). It answers typed yes/no
-checks about coverage and presentation. In my tests it couldn't tell a right figure from a wrong one, so
-correctness is left to the other two scorers.
+Laya, an open-source System-1 decision model (ModernBERT, calibrated probabilities), scores coverage and
+presentation with typed yes/no checks. Numeric correctness is scored deterministically and by the judge. Runs
+stream live: KPIs, accuracy by difficulty, hit rate per charge, and a case table that opens expected vs
+predicted, the judge's rationale and the trace.
 
 ![Experiments: live KPIs, accuracy by difficulty, hit rate per charge and the case table](docs/screenshots/experiments.png)
 
 ## Observability and cost
 
 Docker Compose runs a self-hosted **Langfuse** (web, worker, Postgres, ClickHouse, Redis, MinIO), provisioned
-headlessly from `.env` with sign-up disabled. One chat turn is one trace, and every answer in the UI links to it.
+from `.env` with sign-up disabled. One chat turn is one trace, and every answer in the UI links to it. At
+startup the API registers a price for every usage key the OpenAI integration reports (input, cache reads and
+writes, output, reasoning), so Langfuse's costs match the app's own to the cent.
 
 ![Langfuse trace of one answer: profile extraction and explanation, with cost per step](docs/screenshots/langfuse-trace.png)
 
-Cost is measured, not estimated. Every ingestion stage, compile, answer and eval case records input, output,
-cached and reasoning tokens and dollars, shown in the UI and in Langfuse. Langfuse initially under-counted:
-OpenAI reports prompt-cache writes under a separate usage key that had no price. Every key is now priced, and the
-two agree trace for trace.
+Every ingestion stage, compile, answer and eval case records input, output, cached and reasoning tokens and
+dollars, shown in the UI and in Langfuse:
 
 | Stage (54-page tariff, `gpt-6-luna`) | Input | Output | Cost |
 |---|---:|---:|---:|
 | Vision (29 pages) | 75k | 16k | $0.016 |
 | Facts + digests (82 clauses) | 100k | 67k | $0.044 |
-| Rule compilation (18 rules, with self-consistency) | 3.5M (85% cached) | 413k | $0.56 |
+| Rule compilation (18 rules, verified) | 3.5M (85% cached) | 413k | $0.56 |
 | One answer | ~5–9k | ~0.5k | ~$0.001 |
 
 <details>
@@ -282,7 +266,7 @@ cd backend && uv venv && uv pip install -e ".[dev,laya]"
 .venv/bin/portdues ingest "../Port Tariff.pdf"
 make api                                        # :8000
 make web                                        # :5173, proxies /api
-make test                                       # 54 tests: engine, compiler guards, sectioning, scoring
+make test                                       # engine, compiler verification, sectioning, scoring
 ```
 
 | CLI | |
@@ -319,7 +303,7 @@ Models, effort levels, prices and compile samples are all set in `.env` (`COMPIL
 ```
 backend/portdues
   ingestion/   pages.py (PDF + vision) · sections.py (clause tree) · tree.py (facts + digests) · pipeline.py
-  rules/       schema.py (rule language) · engine.py (evaluator, validator) · compiler.py (agent + guards)
+  rules/       schema.py (rule language) · engine.py (evaluator, validator) · compiler.py (agent + verification)
   agents/      tools.py (tree tools) · profile.py (question → call profile) · strategies.py (answering)
   evals/       golden.jsonl · scorers.py · runner.py · rulebook_check.py (check-rules, compare-rules)
   storage/     db.py (PostgreSQL) · vectors.py (Qdrant)
@@ -329,14 +313,11 @@ frontend/src             React app: documents, chat, experiments
 ```
 </details>
 
-## Limitations
+## Roadmap
 
-- A small model's compile still varies from run to run. The guards bring it to the Sol rulebook's results on
-  this tariff, but a human review of the rulebook (approve or edit a rule) is the next feature I'd build before
-  using it for invoices.
-- Situational services that aren't compiled (dry-docking, fire services, equipment hire) are listed as not
-  priced rather than researched.
-- If the question doesn't name the port, the answer asks for it; a port selector in the chat would make the
-  "given vessel and port" input explicit.
-- A tariff plus a separate amending notice would need rule precedence by effective date.
-- VAT is reported, not added, matching how the reference values are stated.
+- **Rule review** in the rulebook view: approve or edit a compiled rule, with the engine re-validating on save.
+- **On-demand pricing** for situational services (dry-docking, fire services, equipment hire) that sit outside
+  the routine-call rulebook.
+- **Port selector** in the chat, making the "given vessel and port" input explicit.
+- **Amending notices:** rule precedence by effective date for tariffs updated mid-year.
+- **VAT-inclusive totals** as an option (amounts are quoted net, matching the reference values).
